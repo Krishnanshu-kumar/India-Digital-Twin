@@ -3,10 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Data and Plots (too large for git)
-data/
-plots/
-
 # Virtual Environment
 venv/
 env/
