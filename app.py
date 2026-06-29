@@ -291,9 +291,9 @@ def load_india_boundary():
 
 
 @st.cache_data
-def compute_future_projection(_sim, target_year, variables_tuple):
+def compute_future_projection(_sim, target_year, variables_tuple, scenario):
     """Compute and cache future projection for a year and specific variables."""
-    return _sim.project_future_year(target_year, variables_to_project=list(variables_tuple))
+    return _sim.project_future_year(target_year, variables_to_project=list(variables_tuple), scenario=scenario)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -316,10 +316,14 @@ def create_map_df(data_2d, lat, lon, var_name, india_boundary=None):
     return df
 
 
-def render_map(df, var_name, color_range=None):
+def render_map(df, var_name, color_range=None, domain=None):
     """Render a PyDeck heatmap for a climate variable."""
     if color_range is None:
         color_range = COLOR_RANGES.get(var_name, COLOR_RANGES["tmax"])
+
+    kwargs = {}
+    if domain is not None:
+        kwargs["weightDomain"] = domain
 
     heatmap = pdk.Layer(
         "HeatmapLayer",
@@ -329,6 +333,7 @@ def render_map(df, var_name, color_range=None):
         opacity=0.45,
         radiusPixels=40,
         colorRange=color_range,
+        **kwargs
     )
 
     tooltip_layer = pdk.Layer(
@@ -453,6 +458,7 @@ def main():
             '<div class="section-header">Projection Settings</div>',
             unsafe_allow_html=True,
         )
+        scenario = st.sidebar.radio("Scenario", ["Moderate", "Extreme"], index=0, help="Extreme mimics RCP 8.5")
         target_year = st.sidebar.slider("Target Year", 2025, 2050, 2030)
 
         st.sidebar.markdown("---")
@@ -527,7 +533,7 @@ def main():
     if mode == "Future Simulation":
         _render_future_mode(
             simulator, india_boundary, selected_vars, lat, lon,
-            target_year, month_idx, current_month, auto_play, speed, selected_page
+            target_year, month_idx, current_month, auto_play, speed, selected_page, scenario
         )
     else:
         _render_historical_mode(
@@ -552,10 +558,10 @@ def main():
 # ─────────────────────────────────────────────────────────────────────
 def _render_future_mode(
     simulator, india_boundary, available_vars, lat, lon,
-    target_year, month_idx, current_month, auto_play, speed, selected_page
+    target_year, month_idx, current_month, auto_play, speed, selected_page, scenario
 ):
     with st.spinner(f"Computing projections and rendering maps for {selected_page}..."):
-        projections = compute_future_projection(simulator, target_year, tuple(available_vars))
+        projections = compute_future_projection(simulator, target_year, tuple(available_vars), scenario)
 
     # Header
     st.markdown(f"""
@@ -691,7 +697,14 @@ def _render_map_grid(simulator, india_boundary, lat, lon, available_vars,
             df = create_map_df(data_2d, lat, lon, var, india_boundary)
 
             if len(df) > 0:
-                deck = render_map(df, var)
+                domain = None
+                if future:
+                    baseline = simulator.get_baseline_monthly(var)
+                    if baseline is not None:
+                        # Lock color domain to historical extremes
+                        domain = [np.nanmin(baseline), np.nanmax(baseline)]
+
+                deck = render_map(df, var, domain=domain)
                 st.pydeck_chart(deck, use_container_width=True)
 
                 mean_val = np.nanmean(data_2d)

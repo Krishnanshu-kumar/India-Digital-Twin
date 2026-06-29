@@ -294,7 +294,7 @@ class FutureClimateSimulator:
     # ------------------------------------------------------------------
     # FUTURE PROJECTION
     # ------------------------------------------------------------------
-    def project_future_year(self, target_year: int, baseline_end=2023, variables_to_project=None):
+    def project_future_year(self, target_year: int, baseline_end=2023, variables_to_project=None, scenario="Moderate"):
         """
         Project monthly climate fields for a future year.
 
@@ -323,6 +323,12 @@ class FutureClimateSimulator:
                 # Trend contribution: linear extrapolation
                 trend_signal = trend * decades_ahead
 
+                # Apply scenario multiplier
+                if scenario == "Extreme":
+                    # Exponential growth for extreme scenario (RCP 8.5 simulation)
+                    # For a variable that is decreasing (like soil moisture), this accelerates the decrease
+                    trend_signal = np.sign(trend_signal) * (np.abs(trend_signal) * (1.0 + 0.8 * decades_ahead))
+
                 # Seasonal modulation of trend
                 # Temperature trends are stronger in summer, rainfall in monsoon
                 if var in ["tmax", "tmin", "lst"]:
@@ -345,7 +351,11 @@ class FutureClimateSimulator:
 
                 # Add climate variability (scaled noise from historical std)
                 np.random.seed(target_year * 100 + m)
-                noise = np.random.randn(*base.shape) * clim_std[m] * 0.3
+                volatility = 0.3
+                if scenario == "Extreme":
+                    volatility = 1.0 + (decades_ahead * 0.5)  # Severe localized extremes
+                
+                noise = np.random.randn(*base.shape) * clim_std[m] * volatility
                 noise = gaussian_filter(noise, sigma=2)  # spatial smoothing
                 projected_field += noise
 
