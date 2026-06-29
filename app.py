@@ -459,6 +459,7 @@ def main():
             unsafe_allow_html=True,
         )
         scenario = st.sidebar.radio("Scenario", ["Moderate", "Extreme"], index=0, help="Extreme mimics RCP 8.5")
+        view_mode = st.sidebar.radio("Map View", ["Absolute Values", "Anomalies"], index=0, help="Anomalies show change from historical baseline")
         target_year = st.sidebar.slider("Target Year", 2025, 2050, 2030)
 
         st.sidebar.markdown("---")
@@ -533,7 +534,7 @@ def main():
     if mode == "Future Simulation":
         _render_future_mode(
             simulator, india_boundary, selected_vars, lat, lon,
-            target_year, month_idx, current_month, auto_play, speed, selected_page, scenario
+            target_year, month_idx, current_month, auto_play, speed, selected_page, scenario, view_mode
         )
     else:
         _render_historical_mode(
@@ -558,7 +559,7 @@ def main():
 # ─────────────────────────────────────────────────────────────────────
 def _render_future_mode(
     simulator, india_boundary, available_vars, lat, lon,
-    target_year, month_idx, current_month, auto_play, speed, selected_page, scenario
+    target_year, month_idx, current_month, auto_play, speed, selected_page, scenario, view_mode
 ):
     with st.spinner(f"Computing projections and rendering maps for {selected_page}..."):
         projections = compute_future_projection(simulator, target_year, tuple(available_vars), scenario)
@@ -585,9 +586,12 @@ def _render_future_mode(
     # KPI cards
     _render_kpi_cards(simulator, available_vars, projections, month_idx, future=True)
 
+    # Impact Alerts (only show if Extreme or Anomalies are significant)
+    _render_impact_alerts(simulator, available_vars, projections, month_idx)
+
     # 3x3 Map Grid
     _render_map_grid(simulator, india_boundary, lat, lon, available_vars,
-                     projections, month_idx, future=True)
+                     projections, month_idx, future=True, view_mode=view_mode)
 
     # Auto-play logic
     if auto_play and current_month < 12:
@@ -664,8 +668,39 @@ def _render_kpi_cards(simulator, available_vars, data_dict, month_idx, future):
     st.markdown(kpi_html, unsafe_allow_html=True)
 
 
+def _render_impact_alerts(simulator, available_vars, data_dict, month_idx):
+    alerts = []
+    
+    # Check Tmax (Extreme Heat)
+    if "tmax" in data_dict and "tmax" in available_vars:
+        tmax = data_dict["tmax"][month_idx]
+        max_tmax = np.nanmax(tmax)
+        if max_tmax > 45.0:
+            alerts.append(f"🔥 **Extreme Heat Warning:** Maximum temperatures are projected to reach **{max_tmax:.1f}°C**. Severe risk of heat stroke and infrastructure stress.")
+            
+    # Check SST (Cyclone Risk)
+    if "sst" in data_dict and "sst" in available_vars:
+        sst = data_dict["sst"][month_idx]
+        max_sst = np.nanmax(sst)
+        if max_sst > 31.0: # 31C is extreme even for BoB
+            alerts.append(f"🌀 **Cyclone Formation Risk:** Sea Surface Temperatures are extremely high (**{max_sst:.1f}°C**), indicating severe risk for rapid cyclogenesis.")
+            
+    # Check Soil Moisture (Drought)
+    if "soil_moisture" in data_dict and "soil_moisture" in available_vars:
+        soil = data_dict["soil_moisture"][month_idx]
+        mean_soil = np.nanmean(soil)
+        if mean_soil < 0.1:
+            alerts.append(f"🏜️ **Severe Drought Alert:** Average soil moisture has dropped to critically low levels (**{mean_soil:.3f} m³/m³**). High probability of widespread crop failure.")
+
+    if alerts:
+        st.markdown('<div class="section-header" style="color: #ff7b72; border-bottom-color: #ff7b72;">⚠️ Real-World Impact Alerts</div>', unsafe_allow_html=True)
+        for alert in alerts:
+            st.error(alert)
+        st.markdown("<br>", unsafe_allow_html=True)
+
+
 def _render_map_grid(simulator, india_boundary, lat, lon, available_vars,
-                     data_dict, month_idx, future):
+                     data_dict, month_idx, future, view_mode="Absolute Values"):
     source_colors = {"IMD": "#58a6ff", "MOSDAC": "#da3633", "NICES": "#3fb950"}
 
     cols = st.columns(3)
@@ -693,18 +728,32 @@ def _render_map_grid(simulator, india_boundary, lat, lon, available_vars,
             <div class="map-source" style="color:{src_color};">&bull; {source_label}</div>
             """, unsafe_allow_html=True)
 
-            data_2d = data_dict[var][month_idx]
+            data_2d = data_dict[var][month_idx].copy()
+            domain = None
+            color_range = None
+            
+            if future:
+                baseline = simulator.get_baseline_monthly(var)
+                if baseline is not None:
+                    if view_mode == "Anomalies":
+                        # Calculate anomaly: Future - Baseline
+                        data_2d = data_2d - baseline[month_idx]
+                        max_abs = max(abs(np.nanmin(data_2d)), abs(np.nanmax(data_2d)))
+                        # Diverging color scale (Blue -> White -> Red/Brown)
+                        color_range = [
+                            [44, 123, 182], [171, 217, 233],
+                            [255, 255, 191],
+                            [253, 174, 97], [215, 25, 28]
+                        ]
+                        domain = [-max_abs, max_abs]
+                    else:
+                        # Lock absolute domain
+                        domain = [np.nanmin(baseline), np.nanmax(baseline)]
+
             df = create_map_df(data_2d, lat, lon, var, india_boundary)
 
             if len(df) > 0:
-                domain = None
-                if future:
-                    baseline = simulator.get_baseline_monthly(var)
-                    if baseline is not None:
-                        # Lock color domain to historical extremes
-                        domain = [np.nanmin(baseline), np.nanmax(baseline)]
-
-                deck = render_map(df, var, domain=domain)
+                deck = render_map(df, var, color_range=color_range, domain=domain)
                 st.pydeck_chart(deck, use_container_width=True)
 
                 mean_val = np.nanmean(data_2d)

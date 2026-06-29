@@ -32,9 +32,9 @@ class FutureClimateSimulator:
         "tmin":          ("imd", "Min Temperature", "°C", "cool", 2, 32),
         "rain":          ("imd", "Rainfall", "mm/day", "YlGnBu", 0, 25),
         # MOSDAC variables
-        "lst":           ("mosdac", "Land Surface Temp", "K", "inferno", 285, 335),
+        "lst":           ("mosdac", "Land Surface Temp", "°C", "inferno", 12, 62),
         "imc":           ("mosdac", "Satellite Rainfall", "mm/hr", "GnBu", 0, 15),
-        "sst":           ("mosdac", "Sea Surface Temp", "K", "plasma", 295, 310),
+        "sst":           ("mosdac", "Sea Surface Temp", "°C", "plasma", 22, 37),
         "olr":           ("mosdac", "Outgoing Longwave Rad.", "W/m²", "YlOrRd_r", 160, 310),
         # NICES variables
         "soil_moisture": ("nices", "Soil Moisture", "m³/m³", "BrBG", 0.03, 0.50),
@@ -183,6 +183,8 @@ class FutureClimateSimulator:
 
                 da = ds[var]
                 values = da.values
+                if var in ["lst", "sst"]:
+                    values = values - 273.15
 
                 # MOSDAC uses 'month' coordinate (1-12)
                 if "month" in da.dims:
@@ -383,10 +385,8 @@ class FutureClimateSimulator:
             field = np.clip(field, 0.05, 0.50)
         elif var == "olr":
             field = np.clip(field, 100, 350)
-        elif var in ["tmax", "tmin"]:
-            field = np.clip(field, -10, 55)
-        elif var in ["lst", "sst"]:
-            field = np.clip(field, 260, 350)
+        elif var in ["tmax", "tmin", "lst", "sst"]:
+            field = np.clip(field, -10, 75)
         return field
 
     def _apply_spatial_physics(self, field, var, month):
