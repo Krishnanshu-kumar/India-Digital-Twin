@@ -152,7 +152,6 @@ st.markdown("""
     /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
 
     /* Year badge */
     .year-badge {
@@ -330,8 +329,9 @@ def render_map(df, var_name, color_range=None, domain=None):
         data=df,
         get_position=["lon", "lat"],
         get_weight=var_name,
-        opacity=0.45,
-        radiusPixels=40,
+        opacity=0.85,
+        intensity=1.5,
+        radiusPixels=60,
         colorRange=color_range,
         **kwargs
     )
@@ -360,8 +360,9 @@ def render_map(df, var_name, color_range=None, domain=None):
             stroked=True,
             filled=False,
             extruded=False,
-            get_line_color=[255, 255, 255, 120],
-            line_width_min_pixels=1,
+            get_line_color=[255, 255, 255, 255],  # Fully opaque white
+            line_width_min_pixels=2,              # Thicker lines
+            get_line_width=2000,                  # Added baseline width
         )
         layers.append(geo_layer)
 
