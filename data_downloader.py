@@ -14,8 +14,6 @@ Usage:
   python data_downloader.py --start-year 2014 --end-year 2023
 """
 
-import os
-import sys
 import json
 import logging
 import argparse
@@ -24,7 +22,6 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import requests
-from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Configuration

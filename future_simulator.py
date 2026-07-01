@@ -1,6 +1,6 @@
 """
 future_simulator.py
-====================
+
 Physics-informed future climate projection engine for the Pan-India Digital Twin.
 
 Projects future weather patterns by:
@@ -15,17 +15,19 @@ Supports ALL 9 climate variables:
   NICES:  soil_moisture, albedo
 """
 
+import logging
 import numpy as np
 import xarray as xr
-import pandas as pd
 from pathlib import Path
 from scipy.ndimage import gaussian_filter
+
+log = logging.getLogger("future_simulator")
 
 
 class FutureClimateSimulator:
     """Projects future monthly climate fields from historical data."""
 
-    # Variable metadata: name → (source, display_name, units, colormap, vmin, vmax)
+    # Variable metadata: name - (source, display_name, units, colormap, vmin, vmax)
     VAR_META = {
         # IMD variables
         "tmax":          ("imd", "Max Temperature", "°C", "RdYlBu_r", 15, 48),
@@ -58,9 +60,6 @@ class FutureClimateSimulator:
         self._lat = None
         self._lon = None
 
-    # ------------------------------------------------------------------
-    # DATA LOADING
-    # ------------------------------------------------------------------
     def load_all_historical(self, start_year=2014, end_year=2023):
         """Load all harmonized datasets eagerly into memory."""
         for year in range(start_year, end_year + 1):
@@ -75,24 +74,24 @@ class FutureClimateSimulator:
                     ds = xr.open_dataset(str(imd_path))
                     self._imd_data[year] = ds.load()  # eager load into memory
                     ds.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning(f"Failed to load IMD data for {year}: {e}")
 
             if mosdac_path.exists() and mosdac_path.stat().st_size > 500:
                 try:
                     ds = xr.open_dataset(str(mosdac_path))
                     self._mosdac_data[year] = ds.load()
                     ds.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning(f"Failed to load MOSDAC data for {year}: {e}")
 
             if nices_path.exists() and nices_path.stat().st_size > 500:
                 try:
                     ds = xr.open_dataset(str(nices_path))
                     self._nices_data[year] = ds.load()
                     ds.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning(f"Failed to load NICES data for {year}: {e}")
 
         # Extract lat/lon from IMD (primary grid)
         if self._imd_data:
@@ -105,21 +104,20 @@ class FutureClimateSimulator:
         n_nic = len(self._nices_data)
         return n_imd, n_mos, n_nic
 
-    # ------------------------------------------------------------------
-    # CLIMATOLOGY & TRENDS
-    # ------------------------------------------------------------------
     def compute_climatology(self):
         """Compute monthly climatology (mean & std) and linear trends."""
-        self._compute_imd_climatology()
-        self._compute_mosdac_climatology()
-        self._compute_nices_climatology()
-        
-        # Clear raw data caches to aggressively free up memory.
-        # We only need the computed climatology and trends going forward.
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            self._compute_imd_climatology()
+            self._compute_mosdac_climatology()
+            self._compute_nices_climatology()
+
         self._imd_data.clear()
         self._mosdac_data.clear()
         self._nices_data.clear()
-        
+
         import gc
         gc.collect()
 
@@ -129,6 +127,7 @@ class FutureClimateSimulator:
             monthly_stacks = {m: [] for m in range(1, 13)}
             annual_means = []
             years_list = []
+            field_shape = None
 
             for year in sorted(self._imd_data.keys()):
                 ds = self._imd_data[year]
@@ -139,6 +138,8 @@ class FutureClimateSimulator:
                 times = pd.DatetimeIndex(da.coords["time"].values)
                 months = times.month
                 values = da.values
+                if field_shape is None:
+                    field_shape = values.shape[1:]
 
                 for m in range(1, 13):
                     mask = months == m
@@ -149,9 +150,12 @@ class FutureClimateSimulator:
                 annual_means.append(np.nanmean(values, axis=0))
                 years_list.append(year)
 
-            # Compute climatology: mean and std across years for each month
-            clim = np.zeros((12, *monthly_stacks[1][0].shape))
-            clim_std = np.zeros_like(clim)
+            if field_shape is None:
+               
+                continue
+
+            clim = np.full((12, *field_shape), np.nan)
+            clim_std = np.full((12, *field_shape), np.nan)
             for m in range(1, 13):
                 if monthly_stacks[m]:
                     stack = np.stack(monthly_stacks[m], axis=0)
@@ -165,7 +169,8 @@ class FutureClimateSimulator:
             if len(annual_means) >= 3:
                 self._trends[var] = self._compute_linear_trend(
                     np.stack(annual_means, axis=0),
-                    np.array(years_list)
+                    np.array(years_list),
+                    var_name=var
                 )
 
     def _compute_mosdac_climatology(self):
@@ -222,7 +227,8 @@ class FutureClimateSimulator:
             if len(annual_means) >= 3:
                 self._trends[var] = self._compute_linear_trend(
                     np.stack(annual_means, axis=0),
-                    np.array(years_list)
+                    np.array(years_list),
+                    var_name=var
                 )
 
     def _compute_nices_climatology(self):
@@ -269,38 +275,74 @@ class FutureClimateSimulator:
             if len(annual_means) >= 3:
                 self._trends[var] = self._compute_linear_trend(
                     np.stack(annual_means, axis=0),
-                    np.array(years_list)
+                    np.array(years_list),
+                    var_name=var
                 )
 
-    def _compute_linear_trend(self, annual_stack, years):
-        """Compute pixel-wise linear trend (value per decade)."""
-        n_years = len(years)
+    def _compute_linear_trend(self, annual_stack, years, var_name=None):
+        """
+        Compute pixel-wise linear trend (value per decade), vectorized.
+
+        Replaces a per-pixel `for i in range / for j in range / np.polyfit`
+        triple loop (O(nlat * nlon) Python-level calls — seconds-to-minutes
+        on a full India grid) with a single closed-form ordinary-least-
+        -squares pass across the whole field at once (milliseconds),
+        while still tolerating NaNs independently per pixel.
+        """
+        n_years = annual_stack.shape[0]
         if n_years < 2:
             return np.zeros(annual_stack.shape[1:])
 
-        x = years - years.mean()
-        trend = np.zeros(annual_stack.shape[1:])
+        x = years.astype(np.float64) - years.mean()
+        x = x.reshape(-1, 1, 1)  # broadcast over (nlat, nlon)
 
-        for i in range(annual_stack.shape[1]):
-            for j in range(annual_stack.shape[2]):
-                y = annual_stack[:, i, j]
-                valid = ~np.isnan(y)
-                if valid.sum() >= 2:
-                    coeffs = np.polyfit(x[valid], y[valid], 1)
-                    trend[i, j] = coeffs[0] * 10  # per decade
-                else:
-                    trend[i, j] = 0.0
+        valid = ~np.isnan(annual_stack)
+        n_valid = valid.sum(axis=0)
+
+        y = np.where(valid, annual_stack, 0.0)
+        x_b = np.broadcast_to(x, annual_stack.shape)
+        x_masked = np.where(valid, x_b, 0.0)
+
+        # Per-pixel mean of x and y over only the valid years (handles the
+        # case where a pixel has missing data in some years).
+        with np.errstate(invalid="ignore", divide="ignore"):
+            x_mean = x_masked.sum(axis=0) / n_valid
+            y_mean = y.sum(axis=0) / n_valid
+
+            x_dev = np.where(valid, x_b - x_mean, 0.0)
+            y_dev = np.where(valid, annual_stack - y_mean, 0.0)
+
+            numerator = (x_dev * y_dev).sum(axis=0)
+            denominator = (x_dev ** 2).sum(axis=0)
+
+            slope = numerator / denominator
+
+        # Pixels with < 2 valid years (or zero x-variance) have no defined
+        # trend — set to 0 rather than inf/NaN.
+        slope = np.where((n_valid >= 2) & (denominator > 0), slope, 0.0)
+
+        trend = slope * 10.0  # per decade
+
+        # Physical Trend Regularization & Bounding
+        # Prevents short-baseline interannual weather noise from extrapolating wildly into future projections
+        if var_name in ["rain", "imc"]:
+            # Precipitation over India is stationary in the long run; damp short-term noise by 90%
+            trend = np.clip(trend * 0.10, -1.0, 1.0)
+        elif var_name in ["tmax", "lst"]:
+            # Max temperature decadal warming is bounded (~0.2-0.5 C/decade); damp to avoid heatwave overfitting
+            trend = np.clip(trend * 0.20, -0.8, 1.2)
+        elif var_name in ["tmin", "sst"]:
+            trend = np.clip(trend * 0.50, -1.0, 1.5)
+        elif var_name in ["soil_moisture", "albedo", "olr"]:
+            trend = np.clip(trend * 0.50, -0.05, 0.05)
 
         return trend
 
-    # ------------------------------------------------------------------
-    # FUTURE PROJECTION
-    # ------------------------------------------------------------------
     def project_future_year(self, target_year: int, baseline_end=2023, variables_to_project=None, scenario="Moderate"):
         """
         Project monthly climate fields for a future year.
 
-        Returns dict: var_name → (12, nlat, nlon) array of projected values.
+        Returns dict: var_name - (12, nlat, nlon) array of projected values.
         """
         results = {}
         years_ahead = target_year - baseline_end
@@ -352,12 +394,13 @@ class FutureClimateSimulator:
                 projected_field = base + trend_signal * seasonal_mod
 
                 # Add climate variability (scaled noise from historical std)
-                np.random.seed(target_year * 100 + m)
+                np.random.seed((target_year * 100 + m + abs(hash(var)) % 1000) % 2**32)
                 volatility = 0.3
                 if scenario == "Extreme":
                     volatility = 1.0 + (decades_ahead * 0.5)  # Severe localized extremes
-                
+
                 noise = np.random.randn(*base.shape) * clim_std[m] * volatility
+                noise = np.nan_to_num(noise, nan=0.0)
                 noise = gaussian_filter(noise, sigma=2)  # spatial smoothing
                 projected_field += noise
 
@@ -394,7 +437,7 @@ class FutureClimateSimulator:
         Apply advection-diffusion smoothing to ensure spatial coherence.
         Uses simplified wind patterns for India.
         """
-        # Only apply to fields that benefit from spatial smoothing
+     
         if var in ["albedo"]:
             return field
 
@@ -418,9 +461,6 @@ class FutureClimateSimulator:
         blend[mask] = np.nan
         return blend
 
-    # ------------------------------------------------------------------
-    # BASELINE RETRIEVAL
-    # ------------------------------------------------------------------
     def get_baseline_monthly(self, var):
         """Get the historical monthly climatology for a variable."""
         return self._climatology.get(var, None)

@@ -14,12 +14,10 @@ Pipeline steps:
   5. Write compressed NetCDF4 files to ./data/harmonized/{year}/
 """
 
-import os
-import sys
 import logging
 import argparse
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import numpy as np
 import xarray as xr
@@ -42,6 +40,18 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("harmonizer")
+
+# Track whether h5py is usable in this environment. MOSDAC harmonization is
+# the only step that depends on it — if it's broken (e.g. a Windows DLL load
+# failure from a missing VC++ Redistributable), we still want IMD and NICES
+# to harmonize successfully rather than crashing the whole pipeline.
+try:
+    import h5py  # noqa: F401
+    _H5PY_AVAILABLE = True
+    _H5PY_IMPORT_ERROR = None
+except Exception as e:  # ImportError, OSError (DLL load failures), etc.
+    _H5PY_AVAILABLE = False
+    _H5PY_IMPORT_ERROR = e
 
 
 # ===================================================================
@@ -188,7 +198,13 @@ def harmonize_mosdac(year: int) -> xr.Dataset | None:
     """Parse MOSDAC HDF5 files for a single year."""
     log.info(f"  ── MOSDAC ──")
 
-    import h5py
+    if not _H5PY_AVAILABLE:
+        log.warning(
+            f"    Skipping MOSDAC for {year}: h5py is not usable in this "
+            f"environment ({_H5PY_IMPORT_ERROR!r}). IMD and NICES are unaffected. "
+            f"Fix h5py (see README/troubleshooting) and re-run to backfill MOSDAC."
+        )
+        return None
 
     mosdac_year_dir = RAW_DIR / "mosdac" / str(year)
     if not mosdac_year_dir.exists():
@@ -335,7 +351,11 @@ def harmonize_year(year: int):
 
     # IMD
     imd_out = year_out_dir / f"imd_grid_{year}.nc"
-    ds_imd = harmonize_imd(year)
+    try:
+        ds_imd = harmonize_imd(year)
+    except Exception as e:
+        log.error(f"    ✗ IMD harmonization failed for {year}: {e}")
+        ds_imd = None
     if ds_imd is not None:
         ds_imd.to_netcdf(str(imd_out), engine="netcdf4",
                          encoding={v: {"zlib": True, "complevel": 4} for v in ds_imd.data_vars})
@@ -346,7 +366,11 @@ def harmonize_year(year: int):
 
     # MOSDAC
     mosdac_out = year_out_dir / f"insat_L2B_{year}.nc"
-    ds_mosdac = harmonize_mosdac(year)
+    try:
+        ds_mosdac = harmonize_mosdac(year)
+    except Exception as e:
+        log.error(f"    ✗ MOSDAC harmonization failed for {year}: {e}")
+        ds_mosdac = None
     if ds_mosdac is not None:
         ds_mosdac.to_netcdf(str(mosdac_out), engine="netcdf4",
                             encoding={v: {"zlib": True, "complevel": 4} for v in ds_mosdac.data_vars})
@@ -357,7 +381,11 @@ def harmonize_year(year: int):
 
     # NICES
     nices_out = year_out_dir / f"nices_ecv_{year}.nc"
-    ds_nices = harmonize_nices(year)
+    try:
+        ds_nices = harmonize_nices(year)
+    except Exception as e:
+        log.error(f"    ✗ NICES harmonization failed for {year}: {e}")
+        ds_nices = None
     if ds_nices is not None:
         ds_nices.to_netcdf(str(nices_out), engine="netcdf4",
                            encoding={v: {"zlib": True, "complevel": 4} for v in ds_nices.data_vars})
@@ -461,6 +489,14 @@ def print_summary(start_year, end_year):
     log.info(f"\n  ── Target Grid: 0.25° × 0.25° │ {len(TARGET_LAT)}×{len(TARGET_LON)} │ EPSG:4326")
     log.info(f"  ── Grand Total: {grand_total / (1024*1024):.1f} MB ({grand_total / (1024*1024*1024):.2f} GB)")
 
+    if not _H5PY_AVAILABLE:
+        log.info("")
+        log.info("  ⚠️  MOSDAC was skipped for all years because h5py could not be")
+        log.info(f"      imported in this environment ({_H5PY_IMPORT_ERROR!r}).")
+        log.info("      Fix h5py, then re-run this script — IMD/NICES files that")
+        log.info("      already exist on disk will be skipped automatically, so")
+        log.info("      only MOSDAC will be (re)harmonized.")
+
 
 # ===================================================================
 # MAIN
@@ -482,6 +518,14 @@ def main():
     log.info(f"║  Period: {args.start_year} – {args.end_year}  ({args.end_year - args.start_year + 1} years)                        ║")
     log.info("╚══════════════════════════════════════════════════════╝")
     log.info("")
+
+    if not _H5PY_AVAILABLE:
+        log.warning(
+            f"h5py import failed ({_H5PY_IMPORT_ERROR!r}). MOSDAC harmonization "
+            f"will be SKIPPED for every year below — IMD and NICES are unaffected. "
+            f"See the troubleshooting notes for fixing h5py on Windows."
+        )
+        log.info("")
 
     for year in range(args.start_year, args.end_year + 1):
         harmonize_year(year)
